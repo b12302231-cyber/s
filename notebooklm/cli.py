@@ -1,11 +1,15 @@
 """Main CLI entry point for the notebooklm command."""
 
+import json
 import sys
+from pathlib import Path
 
 import click
 from rich.console import Console
 
 from . import auth, config
+from .commands.agent import agent_group
+from .commands.auth_cmds import auth_group
 from .commands.download import download
 from .commands.generate import generate
 from .commands.source import source
@@ -13,6 +17,40 @@ from .commands.source import source
 console = Console()
 err_console = Console(stderr=True)
 
+# ---------------------------------------------------------------------------
+# Supported output languages
+# ---------------------------------------------------------------------------
+
+_LANGUAGES = [
+    ("ar", "Arabic"),
+    ("zh-CN", "Chinese (Simplified)"),
+    ("zh-TW", "Chinese (Traditional)"),
+    ("nl", "Dutch"),
+    ("en", "English"),
+    ("fr", "French"),
+    ("de", "German"),
+    ("hi", "Hindi"),
+    ("id", "Indonesian"),
+    ("it", "Italian"),
+    ("ja", "Japanese"),
+    ("ko", "Korean"),
+    ("pl", "Polish"),
+    ("pt", "Portuguese"),
+    ("ru", "Russian"),
+    ("es", "Spanish"),
+    ("sv", "Swedish"),
+    ("tr", "Turkish"),
+    ("uk", "Ukrainian"),
+    ("vi", "Vietnamese"),
+]
+
+# Path where the Claude Code skill template is expected when installed
+_SKILL_PATH = Path.home() / ".claude" / "notebooklm.md"
+
+
+# ---------------------------------------------------------------------------
+# Root group
+# ---------------------------------------------------------------------------
 
 @click.group()
 @click.version_option(package_name="notebooklm")
@@ -21,7 +59,7 @@ def main():
 
 
 # ---------------------------------------------------------------------------
-# Authentication
+# Authentication (top-level shortcuts kept for ergonomics)
 # ---------------------------------------------------------------------------
 
 @main.command("login")
@@ -144,9 +182,131 @@ def cmd_ask(question: str):
 
 
 # ---------------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------------
+
+@main.command("metadata")
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON.")
+def cmd_metadata(as_json: bool):
+    """Export notebook metadata and sources."""
+    from . import client
+
+    notebook_id = config.require_active_notebook()
+    resp = client.get(f"/notebooks/{notebook_id}")
+    data = resp.json()
+
+    if as_json:
+        click.echo(json.dumps(data, indent=2))
+        return
+
+    console.print(f"[bold]ID:[/bold]    {data.get('id', notebook_id)}")
+    console.print(f"[bold]Title:[/bold] {data.get('title', '(untitled)')}")
+    sources = data.get("sources", [])
+    console.print(f"[bold]Sources:[/bold] {len(sources)}")
+    for s in sources:
+        console.print(
+            f"  [{s.get('type', '?')}] {s.get('title', s.get('url', s.get('id', '?')))}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Language
+# ---------------------------------------------------------------------------
+
+@main.group("language")
+def language_group():
+    """Language settings."""
+
+
+@language_group.command("list")
+def language_list():
+    """List supported output languages."""
+    from rich.table import Table
+
+    table = Table("Code", "Language", show_header=True, header_style="bold")
+    for code, name in _LANGUAGES:
+        table.add_row(code, name)
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Share
+# ---------------------------------------------------------------------------
+
+@main.group("share")
+def share_group():
+    """Sharing settings."""
+
+
+@share_group.command("status")
+def share_status():
+    """Inspect the sharing state of the active notebook."""
+    from . import client
+    from rich.table import Table
+
+    notebook_id = config.require_active_notebook()
+    resp = client.get(f"/notebooks/{notebook_id}/share")
+    data = resp.json()
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("Notebook ID", notebook_id)
+    table.add_row("Visibility", data.get("visibility", "unknown"))
+    table.add_row("Link sharing", "enabled" if data.get("linkSharingEnabled") else "disabled")
+    link = data.get("shareLink", "")
+    if link:
+        table.add_row("Share link", link)
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Skill
+# ---------------------------------------------------------------------------
+
+@main.group("skill")
+def skill_group():
+    """Claude Code skill management."""
+
+
+@skill_group.command("status")
+def skill_status():
+    """Check whether the notebooklm Claude Code skill is installed."""
+    from rich.table import Table
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("check", style="bold")
+    table.add_column("result")
+
+    if _SKILL_PATH.exists():
+        table.add_row(
+            "Skill file",
+            f"[green]installed[/green]  {_SKILL_PATH}",
+        )
+        size = _SKILL_PATH.stat().st_size
+        table.add_row("File size", f"{size} bytes")
+    else:
+        table.add_row(
+            "Skill file",
+            f"[yellow]not found[/yellow]  (expected {_SKILL_PATH})",
+        )
+        table.add_row(
+            "Install",
+            "notebooklm agent show claude > ~/.claude/notebooklm.md",
+        )
+
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
 # Attach sub-command groups
 # ---------------------------------------------------------------------------
 
+main.add_command(auth_group)
+main.add_command(agent_group)
 main.add_command(source)
 main.add_command(generate)
 main.add_command(download)
+main.add_command(language_group)
+main.add_command(share_group)
+main.add_command(skill_group)
